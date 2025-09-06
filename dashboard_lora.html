@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>LoRa SX1278 Dashboard — JFMDKAVG</title>
+<!-- MQTT.js -->
+<script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+<style>
+  :root { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+  body { margin: 24px; background: #0b1220; color: #e6eefc; }
+  h1 { margin: 0 0 12px; font-size: 22px; }
+  .card { background: #111a2e; border: 1px solid #243355; border-radius: 14px; padding: 16px; box-shadow: 0 6px 18px rgba(0,0,0,.25); }
+  .row { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); margin-bottom: 12px; }
+  label { font-size: 12px; color: #a9bddf; display:block; margin-bottom: 4px; }
+  input, select { width: 100%; padding: 10px; border-radius: 10px; border: 1px solid #2a3a60; background: #0e1730; color:#e6eefc; }
+  .btn { padding: 10px 14px; border-radius: 12px; border: 1px solid #2a3a60; background: #1a2a52; color:#e6eefc; cursor: pointer; }
+  .btn:hover { filter: brightness(1.1); }
+  .btn:disabled { opacity: .5; cursor: not-allowed; }
+  .status { display:flex; align-items:center; gap:10px; margin: 8px 0 0; font-size: 13px; color:#a9bddf; }
+  .dot { width:10px; height:10px; border-radius:50%; background:#d66; box-shadow:0 0 8px #d66; }
+  .dot.ok { background:#3bd17c; box-shadow:0 0 8px #3bd17c; }
+  table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+  th, td { border-bottom: 1px solid #243355; padding: 8px 10px; font-size: 14px; text-align: left; }
+  th { position: sticky; top: 0; background:#0f1833; z-index:1; }
+  .flex { display:flex; gap:8px; flex-wrap: wrap; }
+  .pill { font-size: 12px; background:#0f1d3d; border:1px solid #233660; padding:6px 10px; border-radius:999px; }
+  .muted { color:#a9bddf; font-size:12px; }
+</style>
+</head>
+<body>
+  <h1>LoRa SX1278 Dashboard — JFMDKAVG</h1>
+
+  <div class="card">
+    <div class="row">
+      <div>
+        <label>MQTT Host</label>
+        <input id="host" value="test.mosquitto.org" />
+      </div>
+      <div>
+        <label>Puerto (WS/WSS)</label>
+        <input id="port" type="number" value="8081" />
+      </div>
+      <div>
+        <label>Ruta WebSocket</label>
+        <input id="path" value="/mqtt" />
+      </div>
+      <div>
+        <label>Tópico</label>
+        <input id="topic" value="iot/lora/JFMDKAVG/gateway" />
+      </div>
+      <div>
+        <label>SSL (WSS)</label>
+        <select id="ssl">
+          <option value="true" selected>Sí (recomendado)</option>
+          <option value="false">No (WS)</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="flex">
+      <button id="btnConnect" class="btn">Conectar</button>
+      <button id="btnDisconnect" class="btn" disabled>Desconectar</button>
+      <button id="btnExport" class="btn" disabled>Exportar CSV</button>
+      <span class="pill">Mensajes: <span id="count">0</span></span>
+      <span class="pill">Cliente: <span id="cid">—</span></span>
+    </div>
+    <div class="status"><span id="dot" class="dot"></span><span id="state">Desconectado</span></div>
+    <div class="muted">Tip: si no conecta, prueba puerto <b>8080</b> y SSL = <b>No</b> o cambia de broker.</div>
+  </div>
+
+  <div class="card" style="margin-top:16px; overflow:auto; max-height:70vh;">
+    <table id="table">
+      <thead>
+        <tr>
+          <th>Timestamp (local)</th>
+          <th>Equipo</th>
+          <th>Contador</th>
+          <th>RSSI</th>
+        </tr>
+      </thead>
+      <tbody id="tbody"></tbody>
+    </table>
+  </div>
+
+<script>
+(() => {
+  const $ = (id)=>document.getElementById(id);
+  const host = $("host"), port = $("port"), path = $("path"), topic = $("topic"), ssl = $("ssl");
+  const btnConnect = $("btnConnect"), btnDisconnect = $("btnDisconnect"), btnExport = $("btnExport");
+  const dot = $("dot"), state = $("state"), countEl = $("count"), cidEl = $("cid"), tbody = $("tbody");
+
+  let client = null;
+  let msgCount = 0;
+  const rows = [];
+
+  const setStatus = (ok, text) => {
+    dot.classList.toggle("ok", !!ok);
+    state.textContent = text || (ok ? "Conectado" : "Desconectado");
+  };
+  const enableUI = (connected) => {
+    btnConnect.disabled = connected;
+    btnDisconnect.disabled = !connected;
+    btnExport.disabled = rows.length === 0;
+  };
+  const makeClientId = () => "web-" + Math.random().toString(16).slice(2, 10);
+
+  function connect() {
+    const useSSL = (ssl.value === "true");
+    const h = host.value.trim();
+    const p = Number(port.value);
+    const pa = path.value.trim() || "/mqtt";
+
+    const url = (useSSL ? "wss://" : "ws://") + h + ":" + p + pa;
+    const clientId = makeClientId();
+    cidEl.textContent = clientId;
+
+    setStatus(false, "Conectando…");
+
+    client = mqtt.connect(url, {
+      clientId,
+      keepalive: 60,
+      reconnectPeriod: 2000, // auto-reconnect
+      clean: true
+    });
+
+    client.on("connect", () => {
+      setStatus(true, "Conectado");
+      enableUI(true);
+      client.subscribe(topic.value.trim(), { qos: 0 });
+    });
+
+    client.on("reconnect", () => setStatus(false, "Reconectando…"));
+    client.on("close", () => { setStatus(false, "Desconectado"); enableUI(false); });
+    client.on("error", (err) => { console.error("MQTT error:", err.message || err); setStatus(false, "Error de conexión"); });
+
+    client.on("message", (_topic, payload) => {
+      msgCount++; countEl.textContent = msgCount;
+
+      let data = {};
+      try { data = JSON.parse(payload.toString()); }
+      catch { data = { payload: payload.toString() }; }
+
+      const equipo = data.Equipo ?? "—";
+      const contador = data.Contador ?? "—";
+      const rssi = data.RSSI ?? "—";
+      let ts = data.timestamp ?? Date.now();
+      if (typeof ts === "string") ts = Number(ts);
+      if (ts && ts < 1e12) ts *= 1000;
+      const when = new Date(ts).toLocaleString();
+
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${when}</td><td>${equipo}</td><td>${contador}</td><td>${rssi}</td>`;
+      tbody.prepend(tr);
+
+      rows.push({ timestamp: when, Equipo: equipo, Contador: contador, RSSI: rssi });
+      btnExport.disabled = rows.length === 0;
+    });
+  }
+
+  function disconnect() {
+    try { client && client.end(true); } catch {}
+    setStatus(false, "Desconectado");
+    enableUI(false);
+  }
+
+  function exportCSV() {
+    if (!rows.length) return;
+    const headers = ["timestamp","Equipo","Contador","RSSI"];
+    const csv = [
+      headers.join(","),
+      ...rows.map(r => headers.map(h => {
+        const v = (r[h] ?? "");
+        const s = String(v).replace(/"/g,'""');
+        return /[",\n]/.test(s) ? `"${s}"` : s;
+      }).join(","))
+    ].join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const a = document.createElement("a");
+    const pad = n => String(n).padStart(2,"0");
+    const d = new Date();
+    a.href = URL.createObjectURL(blob);
+    a.download = `lora_JFMDKAVG_${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  btnConnect.addEventListener("click", connect);
+  btnDisconnect.addEventListener("click", disconnect);
+  btnExport.addEventListener("click", exportCSV);
+})();
+</script>
+</body>
+</html>
